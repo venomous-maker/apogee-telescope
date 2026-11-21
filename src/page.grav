@@ -5,7 +5,9 @@ import "std"
 namespace apogee {
 
     class TelescopePage {
-        static fn html(base: string) -> string { return Str.replace(TelescopePage.template(), "__BASE__", base); }
+        static fn html(base: string) -> string {
+            return Str.replace(TelescopePage.template(), "__BASE__", base);
+        }
 
         private static fn template() -> string {
             return r"""<!doctype html>

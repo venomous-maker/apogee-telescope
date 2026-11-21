@@ -22,7 +22,13 @@ class Note extends Model {
     public title: string = ""
 }
 
-class Ping extends Job { constructor() {}  fn tags() -> Array<string> { return ["ping"] }  fn handle() {} }
+class Ping extends Job {
+    constructor() {}
+    fn tags() -> Array<string> {
+        return ["ping"]
+    }
+    fn handle() {}
+}
 
 fn setup() -> HttpKernel {
     let file = Dir.temp() + "/telescope_test_" + str(Process.pid()) + ".sqlite"

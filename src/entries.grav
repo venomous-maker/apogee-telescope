@@ -88,14 +88,19 @@ namespace apogee {
         private byId: HashMap<string, TelescopeEntry> = new HashMap<string, TelescopeEntry>()
         private seq: long = 0
         private lock: Mutex = new Mutex()
-        constructor(keep: int = 1000) { self.keep = keep; }
+        constructor(keep: int = 1000) {
+            self.keep = keep;
+        }
         fn store(entries: Array<TelescopeEntry>) {
             self.lock.lock();
             for (e in entries) {
                 self.seq += 1;
                 e.seq = self.seq;
                 let d = self.byType.getOr(e.type, null);
-                if (d == null) { d = new Deque<TelescopeEntry>(); self.byType.put(e.type, d); }
+                if (d == null) {
+                    d = new Deque<TelescopeEntry>()
+                    self.byType.put(e.type, d)
+                }
                 d.pushFront(e);
                 self.byId.put(e.id, e);
                 while (d.size() > self.keep) { self.byId.remove(d.popBack().id); }
@@ -112,7 +117,10 @@ namespace apogee {
             let out = new Array<TelescopeEntry>();
             self.lock.lock();
             let all = new Array<TelescopeEntry>();
-            if (q.type != "") { let d = self.byType.getOr(q.type, null); if (d != null) { for (e in d) { all.push(e); } } }
+            if (q.type != "") {
+                let d = self.byType.getOr(q.type, null)
+                if (d != null) { for (e in d) { all.push(e); } }
+            }
             else { for ((_, d) in self.byType) { for (e in d) { all.push(e); } } }
             self.lock.unlock();
             if (q.type == "") { all.sortBy(fn(a: TelescopeEntry, b: TelescopeEntry) -> int { return a.seq > b.seq ? -1 : (a.seq < b.seq ? 1 : 0); }); }
@@ -137,12 +145,20 @@ namespace apogee {
             let n: long = 0;
             self.lock.lock();
             for ((_, d) in self.byType) {
-                while (!d.isEmpty() && d.peekBack().createdAt < cut) { self.byId.remove(d.popBack().id); n += 1; }
+                while (!d.isEmpty() && d.peekBack().createdAt < cut) {
+                    self.byId.remove(d.popBack().id)
+                    n += 1
+                }
             }
             self.lock.unlock();
             return n;
         }
-        fn clear() { self.lock.lock(); self.byType.clear(); self.byId.clear(); self.lock.unlock(); }
+        fn clear() {
+            self.lock.lock()
+            self.byType.clear()
+            self.byId.clear()
+            self.lock.unlock()
+        }
     }
 
     // In a database (SQLite, MySQL, PostgreSQL), shared by every process.
@@ -150,7 +166,10 @@ namespace apogee {
         public table: string
         private pool: Pool
         private seq: AtomicInt = new AtomicInt(0)
-        constructor(pool: Pool, table: string = "telescope_entries") { self.pool = pool; self.table = table; }
+        constructor(pool: Pool, table: string = "telescope_entries") {
+            self.pool = pool
+            self.table = table
+        }
         private fn with(f: fn(Connection)) {
             let c = self.pool.acquire();
             try { f(c); } finally { self.pool.release(c); }
@@ -204,10 +223,25 @@ namespace apogee {
             self.with(fn(c: Connection) {
                 let where = new Array<string>();
                 let args = new Array<any>();
-                if (q.type != "") { where.push("type = ?"); args.push(q.type); }
-                if (q.batchId != "") { where.push("batch_id = ?"); args.push(q.batchId); }
-                if (q.beforeSeq > 0) { where.push("seq < ?"); args.push(q.beforeSeq); }
-                if (q.tag != "") { where.push("(tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)"); args.push(q.tag); args.push(q.tag + ",%"); args.push("%," + q.tag); args.push("%," + q.tag + ",%"); }
+                if (q.type != "") {
+                    where.push("type = ?")
+                    args.push(q.type)
+                }
+                if (q.batchId != "") {
+                    where.push("batch_id = ?")
+                    args.push(q.batchId)
+                }
+                if (q.beforeSeq > 0) {
+                    where.push("seq < ?")
+                    args.push(q.beforeSeq)
+                }
+                if (q.tag != "") {
+                    where.push("(tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)")
+                    args.push(q.tag)
+                    args.push(q.tag + ",%")
+                    args.push("%," + q.tag)
+                    args.push("%," + q.tag + ",%")
+                }
                 let sql = "SELECT * FROM " + self.table + (where.size() > 0 ? " WHERE " + Str.join(where, " AND ") : "") + " ORDER BY seq DESC LIMIT " + str(q.limit);
                 out = self.entries(c.query(sql, args));
             });
@@ -225,6 +259,8 @@ namespace apogee {
             self.with(fn(c: Connection) { n = c.execute("DELETE FROM " + self.table + " WHERE created_at < ?", [Time.nowMs() - hours * 3600000]); });
             return n;
         }
-        fn clear() { self.with(fn(c: Connection) { c.execute("DELETE FROM " + self.table); }); }
+        fn clear() {
+            self.with(fn(c: Connection) { c.execute("DELETE FROM " + self.table); });
+        }
     }
 }

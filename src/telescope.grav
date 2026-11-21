@@ -53,11 +53,19 @@ namespace apogee {
         private static pending: HashMap<long, Array<TelescopeEntry>> = new HashMap<long, Array<TelescopeEntry>>()
         private static lock: Mutex = new Mutex()
 
-        static fn use(s: TelescopeStore) { Telescope.store = s; }
-        static fn pause() { Telescope.recording = false; }
-        static fn resume() { Telescope.recording = true; }
+        static fn use(s: TelescopeStore) {
+            Telescope.store = s;
+        }
+        static fn pause() {
+            Telescope.recording = false;
+        }
+        static fn resume() {
+            Telescope.recording = true;
+        }
         // Who may see the dashboard (default: this machine only).
-        static fn setGate(allow: fn(Request) -> bool) { Telescope.gate = allow; }
+        static fn setGate(allow: fn(Request) -> bool) {
+            Telescope.gate = allow;
+        }
 
         // ── recording ──────────────────────────────────────────────────────────
         // Starts a batch on this thread (a request or a job): entries wait for
@@ -109,7 +117,10 @@ namespace apogee {
             let t = Thread.currentId();
             Telescope.lock.lock();
             let p = Telescope.pending.getOr(t, null);
-            if (p != null) { e.batchId = Telescope.batches.get(t); p.push(e); }
+            if (p != null) {
+                e.batchId = Telescope.batches.get(t)
+                p.push(e)
+            }
             Telescope.lock.unlock();
             if (p == null) {
                 let one = new Array<TelescopeEntry>();
@@ -194,7 +205,9 @@ namespace apogee {
             Telescope.record("job", o, tags);
         }
         // Orbit model changes: created, updated (with what changed), deleted.
-        static fn watchModels() { Observers.register("orbit.Model", new TelescopeModelObserver()); }
+        static fn watchModels() {
+            Observers.register("orbit.Model", new TelescopeModelObserver());
+        }
 
         // ── the web side ───────────────────────────────────────────────────────
         static fn routes(router: Router, prefix: string = "telescope") {
@@ -237,11 +250,22 @@ namespace apogee {
                 s.set("recording", Telescope.recording);
                 return ok(s);
             }));
-            router.post(base + "/api/clear", Telescope.guard(fn(req: Request) -> Response { Telescope.store.clear(); return Response.json({"cleared": true}); }));
-            router.post(base + "/api/pause", Telescope.guard(fn(req: Request) -> Response { Telescope.recording = false; return Response.json({"recording": false}); }));
-            router.post(base + "/api/resume", Telescope.guard(fn(req: Request) -> Response { Telescope.recording = true; return Response.json({"recording": true}); }));
+            router.post(base + "/api/clear", Telescope.guard(fn(req: Request) -> Response {
+                Telescope.store.clear()
+                return Response.json({"cleared": true})
+            }));
+            router.post(base + "/api/pause", Telescope.guard(fn(req: Request) -> Response {
+                Telescope.recording = false
+                return Response.json({"recording": false})
+            }));
+            router.post(base + "/api/resume", Telescope.guard(fn(req: Request) -> Response {
+                Telescope.recording = true
+                return Response.json({"recording": true})
+            }));
         }
-        static fn isDashboardPath(path: string) -> bool { return Str.startsWith(path, Telescope.base); }
+        static fn isDashboardPath(path: string) -> bool {
+            return Str.startsWith(path, Telescope.base);
+        }
         private static fn guard(h: fn(Request) -> Response) -> fn(Request) -> Response {
             return fn(req: Request) -> Response {
                 let g = Telescope.gate;
@@ -284,12 +308,16 @@ namespace apogee {
             if (v is Model) { return Telescope.json((v as Model).toMap()); }
             return Json.of(str(v));
         }
-        static fn isHidden(name: string) -> bool { return Telescope.hidden.contains(Str.lower(name)); }
+        static fn isHidden(name: string) -> bool {
+            return Telescope.hidden.contains(Str.lower(name));
+        }
     }
 
     // grav-logger handler: each log line becomes an entry.
     class TelescopeLogHandler implements Handler {
-        fn enabled(l: Level) -> bool { return Telescope.recording; }
+        fn enabled(l: Level) -> bool {
+            return Telescope.recording;
+        }
         fn handle(record: LogRecord) {
             let o = Json.object();
             o.set("level", logger.levelName(record.level));
@@ -317,9 +345,15 @@ namespace apogee {
             tags.push(action);
             Telescope.record("model", o, tags);
         }
-        fn created(m: Model, d: Decorator) { self.entry("created", m, m.toMap()); }
-        fn updated(m: Model, d: Decorator) { self.entry("updated", m, m.getChanges()); }
-        fn deleted(m: Model, d: Decorator) { self.entry("deleted", m, null); }
+        fn created(m: Model, d: Decorator) {
+            self.entry("created", m, m.toMap());
+        }
+        fn updated(m: Model, d: Decorator) {
+            self.entry("updated", m, m.getChanges());
+        }
+        fn deleted(m: Model, d: Decorator) {
+            self.entry("deleted", m, null);
+        }
     }
 
     // Records each request (and everything it did, as its batch).
@@ -368,7 +402,12 @@ namespace apogee {
             }
             let queries = 0;
             let repeated = false;
-            for (e in Telescope.batchEntries()) { if (e.type == "query") { queries += 1; if (e.tags.contains("repeated")) { repeated = true; } } }
+            for (e in Telescope.batchEntries()) {
+                if (e.type == "query") {
+                    queries += 1
+                    if (e.tags.contains("repeated")) { repeated = true; }
+                }
+            }
             o.set("queries", queries as long);
             let tags = new Array<string>();
             tags.push("status:" + str(status));
@@ -381,6 +420,8 @@ namespace apogee {
             if (failure != null) { throw failure; }
             return res;
         }
-        private static fn cut(s: string, n: int) -> string { return s.length > n ? s[..n] + "…" : s; }
+        private static fn cut(s: string, n: int) -> string {
+            return s.length > n ? s[..n] + "…" : s;
+        }
     }
 }
