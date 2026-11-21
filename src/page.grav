@@ -1,0 +1,157 @@
+// page.grav — Telescope's page: one HTML file with its CSS and script (no
+// build step, nothing fetched from elsewhere), over the JSON API.
+import "std"
+
+namespace apogee {
+
+    class TelescopePage {
+        static fn html(base: string) -> string { return Str.replace(TelescopePage.template(), "__BASE__", base); }
+
+        private static fn template() -> string {
+            return r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telescope</title>
+<style>
+:root { --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #6b7385; --line: #e3e6ec; --accent: #6d4ad8;
+        --ok: #1e8e4a; --warn: #b7791f; --bad: #c53030; --code: #f1f3f7; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11141a; --panel: #1a1f28; --text: #e6e9ef; --muted: #8e97a8; --line: #2a313d; --accent: #a08cf5;
+          --ok: #48bb78; --warn: #ecc94b; --bad: #fc8181; --code: #12161d; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; min-height: 100vh; }
+nav { width: 200px; flex: none; background: var(--panel); border-right: 1px solid var(--line); padding: 16px 0; }
+nav h1 { font-size: 17px; margin: 0 16px 14px; }
+nav a { display: flex; justify-content: space-between; padding: 7px 16px; color: var(--text); text-decoration: none; cursor: pointer; }
+nav a.on { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 600; }
+nav a span { color: var(--muted); font-size: 12px; }
+.main { flex: 1; min-width: 0; padding: 18px 24px; }
+.bar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.bar h2 { margin: 0 auto 0 0; font-size: 17px; text-transform: capitalize; }
+input { font: inherit; font-size: 13px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.row { cursor: pointer; } tr.row:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+tr:last-child td { border-bottom: none; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.tag { display: inline-block; font-size: 11px; padding: 0 6px; margin: 2px 4px 0 0; border-radius: 4px; background: var(--code); color: var(--muted); cursor: pointer; }
+.tag.slow, .tag.repeated, .tag.failed, .tag.repeated-queries, .tag.error, .tag.critical { color: var(--bad); }
+.st2 { color: var(--ok); } .st3 { color: var(--muted); } .st4 { color: var(--warn); } .st5 { color: var(--bad); }
+.empty { padding: 16px; color: var(--muted); }
+.more { text-align: center; padding: 10px; }
+#detail { position: fixed; inset: 0 0 0 auto; width: min(760px, 100%); background: var(--panel); border-left: 1px solid var(--line);
+          box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(105%); transition: transform .18s; display: flex; flex-direction: column; z-index: 10; }
+#detail.open { transform: none; }
+#detail .head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+#detail .body { padding: 16px; overflow: auto; }
+#detail h3 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+dl { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; margin: 0; }
+dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
+pre { background: var(--code); padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; margin: 0; max-height: 420px; }
+</style>
+</head>
+<body>
+<nav id="nav"></nav>
+<div class="main">
+  <div class="bar"><h2 id="title">Requests</h2>
+    <input id="tag" placeholder="Filter by tag (slow, status:500, ...)" size="28">
+    <button id="toggle">Pause</button><button id="clear">Clear</button></div>
+  <section><table id="list"></table><div class="more"><button id="more" hidden>Load older</button></div></section>
+</div>
+<aside id="detail" aria-hidden="true"><div class="head"><strong id="dTitle"></strong><span style="margin-left:auto"></span><button id="dClose">Close</button></div><div class="body" id="dBody"></div></aside>
+<script>
+const base = "__BASE__";
+const types = [["request", "Requests"], ["query", "Queries"], ["exception", "Exceptions"], ["log", "Logs"], ["job", "Jobs"], ["model", "Models"], ["dump", "Dumps"]];
+let type = "request", tag = "", rows = [], recording = true;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ago = (ms) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : s < 86400 ? Math.round(s / 3600) + "h ago" : new Date(ms).toLocaleString(); };
+const get = (p) => fetch(base + p, { headers: { Accept: "application/json" } }).then((r) => r.json());
+const post = (p) => fetch(base + p, { method: "POST", headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" } }).then((r) => r.json());
+const tags = (ts) => (ts || []).map((t) => `<span class="tag ${esc(t)}" data-tag="${esc(t)}">${esc(t)}</span>`).join("");
+const ms = (v) => v == null ? "–" : (v < 10 ? v.toFixed(2) : Math.round(v)) + " ms";
+const cols = {
+  request: [["Verb"], ["Path"], ["Status"], ["Duration", "num"], ["Queries", "num"], ["When", "num"]],
+  query: [["Query"], ["Duration", "num"], ["When", "num"]],
+  exception: [["Exception"], ["Message"], ["When", "num"]],
+  log: [["Level"], ["Message"], ["When", "num"]],
+  job: [["Job"], ["Status"], ["Queue"], ["Duration", "num"], ["When", "num"]],
+  model: [["Model"], ["Action"], ["Key"], ["When", "num"]],
+  dump: [["Dump"], ["Type"], ["When", "num"]],
+};
+function cells(e) {
+  const c = e.content, w = `<td class="num">${ago(e.createdAt)}</td>`;
+  switch (e.type) {
+    case "request": return `<td>${esc(c.method)}</td><td class="mono">${esc(c.uri)}<div>${tags(e.tags)}</div></td><td class="st${String(c.status)[0]}">${c.status}</td><td class="num">${ms(c.ms)}</td><td class="num">${c.queries}</td>` + w;
+    case "query": return `<td class="mono">${esc(c.sql)}<div>${tags(e.tags)}</div></td><td class="num">${ms(c.ms)}</td>` + w;
+    case "exception": return `<td>${esc(c.kind)}</td><td>${esc(c.message)}</td>` + w;
+    case "log": return `<td>${tags(e.tags)}</td><td>${esc(c.message)}</td>` + w;
+    case "job": return `<td>${esc(c.job)}<div>${tags(e.tags.filter((t) => t !== c.status))}</div></td><td>${esc(c.status)}</td><td>${esc(c.queue)}</td><td class="num">${c.ms ? ms(c.ms) : "–"}</td>` + w;
+    case "model": return `<td>${esc(c.model)}</td><td>${esc(c.action)}</td><td>${esc(c.key)}</td>` + w;
+    default: return `<td>${esc(c.label || "dump")}</td><td>${esc(c.type)}</td>` + w;
+  }
+}
+function render() {
+  $("title").textContent = types.find((t) => t[0] === type)[1];
+  if (!rows.length) { $("list").innerHTML = `<tr><td class="empty">Nothing recorded${tag ? " with this tag" : ""} yet.</td></tr>`; return; }
+  $("list").innerHTML = "<tr>" + cols[type].map((h) => `<th class="${h[1] || ""}">${h[0]}</th>`).join("") + "</tr>" +
+    rows.map((e) => `<tr class="row" data-id="${esc(e.id)}">${cells(e)}</tr>`).join("");
+  document.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (ev) => { if (!ev.target.closest(".tag")) open(tr.dataset.id); });
+  document.querySelectorAll(".tag[data-tag]").forEach((s) => s.onclick = () => { tag = s.dataset.tag; $("tag").value = tag; load(); });
+}
+async function load(older) {
+  const before = older && rows.length ? rows[rows.length - 1].seq : 0;
+  const got = await get(`/api/entries?type=${type}&tag=${encodeURIComponent(tag)}&before=${before}&limit=50`);
+  if (!older && rows.length && got.map((e) => e.id).join() === rows.slice(0, got.length).map((e) => e.id).join() && got.length === rows.length) return;  // (unchanged: keep the page as it is)
+  rows = older ? rows.concat(got) : got;
+  $("more").hidden = got.length < 50;
+  render();
+}
+async function counts() {
+  const c = await get("/api/counts");
+  recording = c.recording; $("toggle").textContent = recording ? "Pause" : "Resume";
+  $("nav").innerHTML = "<h1>Telescope</h1>" + types.map((t) => `<a class="${t[0] === type ? "on" : ""}" data-t="${t[0]}">${t[1]}<span>${c.counts[t[0]] || 0}</span></a>`).join("");
+  document.querySelectorAll("nav a").forEach((a) => a.onclick = () => { type = a.dataset.t; tag = ""; $("tag").value = ""; counts(); load(); });
+}
+const pre = (v) => `<pre>${esc(typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre>`;
+async function open(id) {
+  const e = await get("/api/entries/" + id);
+  const c = e.content;
+  let html = `<dl><dt>Time</dt><dd>${new Date(e.createdAt).toLocaleString()}</dd><dt>Tags</dt><dd>${tags(e.tags) || "–"}</dd>`;
+  for (const [k, v] of Object.entries(c)) if (typeof v !== "object" || v === null) html += `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`;
+  html += "</dl>";
+  for (const [k, v] of Object.entries(c)) if (typeof v === "object" && v !== null) html += `<h3>${esc(k)}</h3>` + pre(v);
+  if (e.related && e.related.length) {
+    html += `<h3>Also in this ${c.method ? "request" : "batch"}</h3><table>` + e.related.map((r) =>
+      `<tr class="row" data-id="${esc(r.id)}"><td>${esc(r.type)}</td><td class="mono">${esc(r.content.sql || r.content.message || r.content.job || r.content.model || r.content.label || r.content.uri || "")}</td>` +
+      `<td class="num">${r.content.ms != null ? ms(r.content.ms) : ""}</td></tr>`).join("") + "</table>";
+  }
+  $("dTitle").textContent = e.type[0].toUpperCase() + e.type.slice(1);
+  $("dBody").innerHTML = html;
+  $("dBody").querySelectorAll("tr.row").forEach((tr) => tr.onclick = () => open(tr.dataset.id));
+  $("dBody").querySelectorAll(".tag[data-tag]").forEach((s) => s.onclick = () => { tag = s.dataset.tag; $("tag").value = tag; close(); load(); });
+  $("detail").classList.add("open");
+}
+function close() { $("detail").classList.remove("open"); }
+$("dClose").onclick = close;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+$("tag").onkeydown = (e) => { if (e.key === "Enter") { tag = e.target.value.trim(); load(); } };
+$("more").onclick = () => load(true);
+$("clear").onclick = async () => { if (confirm("Delete every entry?")) { await post("/api/clear"); counts(); load(); } };
+$("toggle").onclick = async () => { await post(recording ? "/api/pause" : "/api/resume"); counts(); };
+counts(); load(); setInterval(() => { counts(); if (!$("detail").classList.contains("open")) load(); }, 4000);
+</script>
+</body>
+</html>
+""";
+        }
+    }
+}
