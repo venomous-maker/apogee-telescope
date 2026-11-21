@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.1 (2026-11-21)
+
 - A request that ends in an `HttpException` (a 404 from the router, say) is
   recorded with that status, not as a 500 failure.
 
