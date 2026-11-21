@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.0 (2026-11-21)
+
 The first release. Needs grav 1.10.1 or newer.
 
 - `Telescope`: requests (with their batch: queries, logs, exceptions, model
