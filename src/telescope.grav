@@ -1,0 +1,385 @@
+// telescope.grav — a debugging dashboard for Apogee apps: every request (and
+// what it did: its queries, log lines, exceptions, model changes, dumps),
+// every query (slow ones and repeated ones flagged), exceptions, log lines,
+// queued jobs and model changes, kept for a while and shown at /telescope.
+//
+//   Telescope.use(new DatabaseTelescopeStore(pool))      // or the memory store (the default)
+//   Telescope.watchQueries()                              // Orbit's queries
+//   Telescope.watchExceptions(kernel)                     // what the HTTP kernel reports
+//   Telescope.watchJobs(events)                           // the queue's events
+//   Telescope.watchModels()                               // Orbit saves and deletes
+//   logs.addHandler(new TelescopeLogHandler())            // grav-logger lines
+//   router.middleware... new TelescopeMiddleware()        // the requests
+//   Telescope.routes(router)                              // the page
+//
+// Meant for development and staging: it records what requests carry (with
+// passwords, tokens and cookies hidden). Entries of one request or job share a
+// batch, so a request's page shows everything it did.
+import "std"
+import "std/net"
+import "apogee-container"
+import "apogee-events"
+import "apogee-http"
+import "apogee-routing"
+import "apogee-queue"
+import "grav-orbit"
+import "grav-logger"
+import "entries.grav"
+import "page.grav"
+use orbit.*
+use logger.*
+
+namespace apogee {
+
+    class Telescope {
+        static store: TelescopeStore = new MemoryTelescopeStore()
+        static recording: bool = true
+        // Queries slower than this (ms) are tagged "slow".
+        static slowQueryMs: float = 100.0
+        // The same statement this many times in one request: tagged "repeated" (N+1).
+        static repeatedQueries: int = 5
+        // Request paths not recorded (prefixes; the dashboard's own are never recorded).
+        static ignorePaths: Array<string> = new Array<string>()
+        // Field and header names whose values are hidden.
+        static hidden: Array<string> = ["password", "password_confirmation", "token", "secret", "authorization", "cookie", "set-cookie", "x-csrf-token", "x-xsrf-token"]
+        // Entries kept only when this says so (null: all).
+        static filter: fn(TelescopeEntry) -> bool = null
+        // Set by watchExceptions: the kernel's reports are the exception entries.
+        static watchingExceptions: bool = false
+        private static gate: fn(Request) -> bool = null
+        private static base: string = "/telescope"
+        // thread -> the batch it is recording, and the entries waiting for its end
+        private static batches: HashMap<long, string> = new HashMap<long, string>()
+        private static pending: HashMap<long, Array<TelescopeEntry>> = new HashMap<long, Array<TelescopeEntry>>()
+        private static lock: Mutex = new Mutex()
+
+        static fn use(s: TelescopeStore) { Telescope.store = s; }
+        static fn pause() { Telescope.recording = false; }
+        static fn resume() { Telescope.recording = true; }
+        // Who may see the dashboard (default: this machine only).
+        static fn setGate(allow: fn(Request) -> bool) { Telescope.gate = allow; }
+
+        // ── recording ──────────────────────────────────────────────────────────
+        // Starts a batch on this thread (a request or a job): entries wait for
+        // its end, and are stored together.
+        static fn startBatch() -> string {
+            let id = Text.uuid();
+            let t = Thread.currentId();
+            Telescope.lock.lock();
+            Telescope.batches.put(t, id);
+            Telescope.pending.put(t, new Array<TelescopeEntry>());
+            Telescope.lock.unlock();
+            return id;
+        }
+        // Ends this thread's batch and stores its entries (the request entry last).
+        static fn endBatch() {
+            let t = Thread.currentId();
+            Telescope.lock.lock();
+            let entries = Telescope.pending.getOr(t, null);
+            Telescope.batches.remove(t);
+            Telescope.pending.remove(t);
+            Telescope.lock.unlock();
+            if (entries != null && entries.size() > 0) {
+                try { Telescope.store.store(entries); } catch (e: Exception) {}
+            }
+        }
+        static fn currentBatch() -> string {
+            let t = Thread.currentId();
+            Telescope.lock.lock();
+            let b = Telescope.batches.getOr(t, "");
+            Telescope.lock.unlock();
+            return b;
+        }
+        // The entries this thread's batch holds so far.
+        static fn batchEntries() -> Array<TelescopeEntry> {
+            let t = Thread.currentId();
+            Telescope.lock.lock();
+            let p = Telescope.pending.getOr(t, null);
+            let out = p == null ? new Array<TelescopeEntry>() : p.copy();
+            Telescope.lock.unlock();
+            return out;
+        }
+        // Records an entry: into this thread's batch, or stored now outside one.
+        static fn record(type: string, content: JsonValue, tags: Array<string> = new Array<string>()) -> TelescopeEntry {
+            if (!Telescope.recording) { return null; }
+            let e = new TelescopeEntry(type, content);
+            for (t in tags) { e.tags.push(t); }
+            let f = Telescope.filter;
+            if (f != null && !f(e)) { return null; }
+            let t = Thread.currentId();
+            Telescope.lock.lock();
+            let p = Telescope.pending.getOr(t, null);
+            if (p != null) { e.batchId = Telescope.batches.get(t); p.push(e); }
+            Telescope.lock.unlock();
+            if (p == null) {
+                let one = new Array<TelescopeEntry>();
+                one.push(e);
+                try { Telescope.store.store(one); } catch (x: Exception) {}
+            }
+            return e;
+        }
+        // Records a value to look at later ("dump").
+        static fn dump(value: any, label: string = "") {
+            let o = Json.object();
+            o.set("label", label);
+            o.set("value", Telescope.json(value));
+            o.set("type", typename(value));
+            Telescope.record("dump", o);
+        }
+        static fn recordException(e: Exception, context: HashMap<string, any> = null) {
+            let o = Json.object();
+            o.set("kind", e.kind());
+            o.set("message", e.message());
+            o.set("describe", e.describe());
+            if (context != null) { o.set("context", Telescope.json(context)); }
+            let tags = new Array<string>();
+            tags.push(e.kind());
+            Telescope.record("exception", o, tags);
+        }
+
+        // ── watchers ───────────────────────────────────────────────────────────
+        // Every query Orbit runs (DB.listen).
+        static fn watchQueries() {
+            DB.listen(fn(q: QueryEvent) {
+                if (!Telescope.recording) { return; }
+                let o = Json.object();
+                o.set("sql", q.sql);
+                let b = Json.array();
+                for (x in q.bindings) { b.push(Telescope.json(x)); }
+                o.set("bindings", b);
+                o.set("connection", q.connection);
+                o.set("ms", q.ms);
+                o.set("rows", q.rows);
+                o.set("read", q.read);
+                o.set("cached", q.cached);
+                let tags = new Array<string>();
+                if (q.ms >= Telescope.slowQueryMs) { tags.push("slow"); }
+                // repeated in this batch: the same statement again (an N+1)
+                let same = 0;
+                for (e in Telescope.batchEntries()) { if (e.type == "query" && e.content.getString("sql", "") == q.sql) { same += 1; } }
+                if (same + 1 >= Telescope.repeatedQueries) { tags.push("repeated"); }
+                Telescope.record("query", o, tags);
+            });
+        }
+        // What the HTTP kernel reports (exceptions that became 5xx, or are reportable).
+        static fn watchExceptions(kernel: HttpKernel) {
+            Telescope.watchingExceptions = true;
+            kernel.report(fn(e: Exception, req: Request) {
+                let ctx = new HashMap<string, any>();
+                ctx.put("method", req.method());
+                ctx.put("url", req.fullUrl());
+                Telescope.recordException(e, ctx);
+            });
+        }
+        // The queue's jobs: queued, done (with run time), failed (with the exception).
+        static fn watchJobs(events: Events) {
+            events.listen::<JobQueued>(fn(e: JobQueued) { Telescope.job("queued", e, 0, ""); });
+            events.listen::<JobProcessed>(fn(e: JobProcessed) { Telescope.job("processed", e, e.ms, ""); });
+            events.listen::<JobFailed>(fn(e: JobFailed) { Telescope.job("failed", e, 0, e.exception == null ? "" : e.exception.describe()); });
+        }
+        private static fn job(status: string, e: QueueJobEvent, ms: long, error: string) {
+            let o = Json.object();
+            o.set("status", status);
+            o.set("job", e.job);
+            o.set("id", e.jobId);
+            o.set("connection", e.connection);
+            o.set("queue", e.queue);
+            o.set("ms", ms);
+            o.set("error", error);
+            let p = Json.tryParse(e.payload);
+            if (p != null && p.has("data")) { o.set("data", p.get("data")); }
+            let tags = new Array<string>();
+            tags.push(status);
+            if (p != null && p.has("tags") && p.get("tags").isArray()) { for (t in p.get("tags").asArray()) { if (t.isString()) { tags.push(t.asString()); } } }
+            Telescope.record("job", o, tags);
+        }
+        // Orbit model changes: created, updated (with what changed), deleted.
+        static fn watchModels() { Observers.register("orbit.Model", new TelescopeModelObserver()); }
+
+        // ── the web side ───────────────────────────────────────────────────────
+        static fn routes(router: Router, prefix: string = "telescope") {
+            let p = "/" + Str.trim(prefix);
+            while (Str.endsWith(p, "/") && p.length > 1) { p = p[..p.length - 1]; }
+            Telescope.base = p;
+            let base = p;
+            let ok = fn(v: JsonValue) -> Response { return v == null ? Response.json({"message": "Not found."}, 404) : new Response(HttpResponse.json(200, v)); };
+            router.get(base, Telescope.guard(fn(req: Request) -> Response { return Response.html(TelescopePage.html(base)); }));
+            router.get(base + "/api/entries", Telescope.guard(fn(req: Request) -> Response {
+                let q = new EntryQuery();
+                q.type = req.query("type", "");
+                q.tag = req.query("tag", "");
+                q.batchId = req.query("batch", "");
+                q.beforeSeq = Integer.parseOr(req.query("before", "0"), 0);
+                q.limit = Integer.parseOr(req.query("limit", "50"), 50) as int;
+                let out = Json.array();
+                for (e in Telescope.store.query(q)) { out.push(e.toJson(false)); }
+                return ok(out);
+            }));
+            router.get(base + "/api/entries/{id}", Telescope.guard(fn(req: Request) -> Response {
+                let e = Telescope.store.find(str(req.route("id")));
+                if (e == null) { return ok(null); }
+                let o = e.toJson(true);
+                if (e.batchId != "") {
+                    let q = new EntryQuery();
+                    q.batchId = e.batchId;
+                    q.limit = 500;
+                    let related = Json.array();
+                    for (r in Telescope.store.query(q)) { if (r.id != e.id) { related.push(r.toJson(false)); } }
+                    o.set("related", related);
+                }
+                return ok(o);
+            }));
+            router.get(base + "/api/counts", Telescope.guard(fn(req: Request) -> Response {
+                let o = Json.object();
+                for ((t, n) in Telescope.store.counts()) { o.set(t, n); }
+                let s = Json.object();
+                s.set("counts", o);
+                s.set("recording", Telescope.recording);
+                return ok(s);
+            }));
+            router.post(base + "/api/clear", Telescope.guard(fn(req: Request) -> Response { Telescope.store.clear(); return Response.json({"cleared": true}); }));
+            router.post(base + "/api/pause", Telescope.guard(fn(req: Request) -> Response { Telescope.recording = false; return Response.json({"recording": false}); }));
+            router.post(base + "/api/resume", Telescope.guard(fn(req: Request) -> Response { Telescope.recording = true; return Response.json({"recording": true}); }));
+        }
+        static fn isDashboardPath(path: string) -> bool { return Str.startsWith(path, Telescope.base); }
+        private static fn guard(h: fn(Request) -> Response) -> fn(Request) -> Response {
+            return fn(req: Request) -> Response {
+                let g = Telescope.gate;
+                let allowed = g == null ? Telescope.local(req) : g(req);
+                if (!allowed) { return Response.json({"message": "Forbidden."}, 403); }
+                return h(req);
+            };
+        }
+        static fn local(req: Request) -> bool {
+            let r = req.http.remote;
+            return Str.startsWith(r, "127.") || Str.startsWith(r, "[::1]") || Str.startsWith(r, "::1") || r == "";
+        }
+
+        // ── values as JSON ─────────────────────────────────────────────────────
+        // A value to show: scalars as they are, maps and arrays item by item
+        // (hidden names masked), anything else as its text.
+        static fn json(v: any) -> JsonValue {
+            if (v == null) { return Json.nil(); }
+            if (v is JsonValue) { return v as JsonValue; }
+            if (v is bool) { return Json.of(v as bool); }
+            if (v is long) { return Json.of(v as long); }
+            if (v is int) { return Json.of((v as int) as long); }
+            if (v is float || v is double) { return Json.of(Float.parseOr(str(v), 0.0)); }
+            if (v is string) { return Json.of(v as string); }
+            if (v is HashMap<string, any>) {
+                let o = Json.object();
+                for ((k, x) in v as HashMap<string, any>) { o.set(k, Telescope.isHidden(k) ? Json.of("********") : Telescope.json(x)); }
+                return o;
+            }
+            if (v is HashMap<string, string>) {
+                let o = Json.object();
+                for ((k, x) in v as HashMap<string, string>) { o.set(k, Telescope.isHidden(k) ? "********" : x); }
+                return o;
+            }
+            if (v is Array<any>) {
+                let a = Json.array();
+                for (x in v as Array<any>) { a.push(Telescope.json(x)); }
+                return a;
+            }
+            if (v is Model) { return Telescope.json((v as Model).toMap()); }
+            return Json.of(str(v));
+        }
+        static fn isHidden(name: string) -> bool { return Telescope.hidden.contains(Str.lower(name)); }
+    }
+
+    // grav-logger handler: each log line becomes an entry.
+    class TelescopeLogHandler implements Handler {
+        fn enabled(l: Level) -> bool { return Telescope.recording; }
+        fn handle(record: LogRecord) {
+            let o = Json.object();
+            o.set("level", logger.levelName(record.level));
+            o.set("message", record.message);
+            o.set("channel", record.channel);
+            if (record.context != null) { o.set("context", Telescope.json(record.context)); }
+            let tags = new Array<string>();
+            tags.push(logger.levelName(record.level));
+            Telescope.record("log", o, tags);
+        }
+    }
+
+    // Orbit observer: model changes become entries.
+    class TelescopeModelObserver extends Behavior {
+        constructor() {}
+        private fn entry(action: string, m: Model, changes: HashMap<string, any>) {
+            let info = ClassInfo.of(m);
+            let o = Json.object();
+            o.set("action", action);
+            o.set("model", info == null ? typename(m) : info.name);
+            let map = TableMap.of(info);
+            o.set("key", map.id == null ? "" : str(map.id.field.get(m)));
+            if (changes != null) { o.set("changes", Telescope.json(changes)); }
+            let tags = new Array<string>();
+            tags.push(action);
+            Telescope.record("model", o, tags);
+        }
+        fn created(m: Model, d: Decorator) { self.entry("created", m, m.toMap()); }
+        fn updated(m: Model, d: Decorator) { self.entry("updated", m, m.getChanges()); }
+        fn deleted(m: Model, d: Decorator) { self.entry("deleted", m, null); }
+    }
+
+    // Records each request (and everything it did, as its batch).
+    class TelescopeMiddleware implements Middleware {
+        // Request and response bodies longer than this are cut.
+        public maxBodyBytes: int = 16384
+        constructor() {}
+        fn handle(req: Request, next: fn(Request) -> Response) -> Response {
+            let path = req.path();
+            if (!Telescope.recording || Telescope.isDashboardPath(path)) { return next(req); }
+            for (p in Telescope.ignorePaths) { if (Str.startsWith(path, p)) { return next(req); } }
+            Telescope.startBatch();
+            let started = Time.monotonicNs();
+            let memBefore = Process.memoryUsage();
+            let res: Response = null;
+            let failure: Exception = null;
+            try { res = next(req); } catch (e: Exception) { failure = e; }
+            let ms = (Time.monotonicNs() - started) as float / 1000000.0;
+            let o = Json.object();
+            o.set("method", req.method());
+            o.set("uri", req.http.target);
+            o.set("path", path);
+            o.set("status", (res == null ? 500 : res.http.status) as long);
+            o.set("ms", ms);
+            o.set("ip", req.ip());
+            o.set("memoryKb", ((Process.memoryUsage() - memBefore) / 1024) as long);
+            let user = req.user;
+            o.set("user", user == null ? "" : Telescope.json(user).toJson());
+            let h = Json.object();
+            for (i in 0..req.http.headers.size()) {
+                let n = req.http.headers.nameAt(i);
+                h.set(n, Telescope.isHidden(n) ? "********" : req.http.headers.valueAt(i));
+            }
+            o.set("headers", h);
+            let payload: JsonValue = Json.nil();
+            try { payload = Telescope.json(req.all()); } catch (e: Exception) {}
+            o.set("payload", payload);
+            if (res != null) {
+                let body = res.http.body();
+                let type = res.http.headers.get("Content-Type");
+                if (Str.contains(type, "json")) { o.set("response", Json.tryParse(body) ?? Json.of(TelescopeMiddleware.cut(body, self.maxBodyBytes))); }
+                else if (Str.contains(type, "html")) { o.set("response", "HTML (" + str(body.length) + " bytes)"); }
+                else { o.set("response", TelescopeMiddleware.cut(body, self.maxBodyBytes)); }
+            }
+            let queries = 0;
+            let repeated = false;
+            for (e in Telescope.batchEntries()) { if (e.type == "query") { queries += 1; if (e.tags.contains("repeated")) { repeated = true; } } }
+            o.set("queries", queries as long);
+            let tags = new Array<string>();
+            let status = res == null ? 500 : res.http.status;
+            tags.push("status:" + str(status));
+            if (status >= 500) { tags.push("failed"); }
+            if (repeated) { tags.push("repeated-queries"); }
+            // (once: the kernel reports what reaches it, when that is watched)
+            if (failure != null && !Telescope.watchingExceptions) { Telescope.recordException(failure); }
+            Telescope.record("request", o, tags);
+            Telescope.endBatch();
+            if (failure != null) { throw failure; }
+            return res;
+        }
+        private static fn cut(s: string, n: int) -> string { return s.length > n ? s[..n] + "…" : s; }
+    }
+}
