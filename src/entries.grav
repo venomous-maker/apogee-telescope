@@ -1,0 +1,230 @@
+// entries.grav — what Telescope records and where it keeps it. An entry is one
+// thing that happened (a request, a query, an exception, a log line, a job, a
+// model change, a dump), with the batch it belongs to (everything one request
+// or job did) and tags to find it by.
+import "std"
+import "grav-db"
+use db.*
+
+namespace apogee {
+
+    class TelescopeEntry {
+        public id: string
+        // Order of recording (larger is newer).
+        public seq: long = 0
+        // The request or job it happened in ("" outside one).
+        public batchId: string = ""
+        // "request", "query", "exception", "log", "job", "model", "dump"
+        public type: string
+        // Unix milliseconds.
+        public createdAt: long
+        public content: JsonValue
+        public tags: Array<string> = new Array<string>()
+        constructor(type: string, content: JsonValue) {
+            self.id = Text.uuid();
+            self.type = type;
+            self.content = content;
+            self.createdAt = Time.nowMs();
+        }
+        fn toJson(full: bool = true) -> JsonValue {
+            let o = Json.object();
+            o.set("id", self.id);
+            o.set("seq", self.seq);
+            o.set("batchId", self.batchId);
+            o.set("type", self.type);
+            o.set("createdAt", self.createdAt);
+            let t = Json.array();
+            for (x in self.tags) { t.push(x); }
+            o.set("tags", t);
+            o.set("content", full ? self.content : TelescopeEntry.summary(self.content));
+            return o;
+        }
+        // The content without its big parts (a list shows only this).
+        static fn summary(c: JsonValue) -> JsonValue {
+            if (!c.isObject()) { return c; }
+            let o = Json.object();
+            for ((k, v) in c.entries()) {
+                if (k == "headers" || k == "payload" || k == "response" || k == "context" || k == "data" || k == "bindings") { continue; }
+                if (v.isString() && v.asString().length > 300) { o.set(k, v.asString()[..300] + "…"); } else { o.set(k, v); }
+            }
+            return o;
+        }
+        static fn fromRow(id: string, seq: long, batch: string, type: string, at: long, content: string, tags: string) -> TelescopeEntry {
+            let e = new TelescopeEntry(type, Json.tryParse(content) ?? Json.object());
+            e.id = id;
+            e.seq = seq;
+            e.batchId = batch;
+            e.createdAt = at;
+            for (t in Str.split(tags, ",")) { if (t != "") { e.tags.push(t); } }
+            return e;
+        }
+    }
+
+    // Which entries to list.
+    class EntryQuery {
+        public type: string = ""        // "" for all
+        public tag: string = ""
+        public batchId: string = ""
+        public beforeSeq: long = 0      // 0: from the newest
+        public limit: int = 50
+    }
+
+    interface TelescopeStore {
+        fn store(entries: Array<TelescopeEntry>)
+        fn find(id: string) -> TelescopeEntry
+        // Newest first.
+        fn query(q: EntryQuery) -> Array<TelescopeEntry>
+        // How many entries of each type there are.
+        fn counts() -> HashMap<string, long>
+        // Removes entries older than `hours`; how many.
+        fn prune(hours: long) -> long
+        fn clear()
+    }
+
+    // In this process's memory, the newest `keep` of each type. Thread-safe.
+    class MemoryTelescopeStore implements TelescopeStore {
+        public keep: int
+        private byType: HashMap<string, Deque<TelescopeEntry>> = new HashMap<string, Deque<TelescopeEntry>>()
+        private byId: HashMap<string, TelescopeEntry> = new HashMap<string, TelescopeEntry>()
+        private seq: long = 0
+        private lock: Mutex = new Mutex()
+        constructor(keep: int = 1000) { self.keep = keep; }
+        fn store(entries: Array<TelescopeEntry>) {
+            self.lock.lock();
+            for (e in entries) {
+                self.seq += 1;
+                e.seq = self.seq;
+                let d = self.byType.getOr(e.type, null);
+                if (d == null) { d = new Deque<TelescopeEntry>(); self.byType.put(e.type, d); }
+                d.pushFront(e);
+                self.byId.put(e.id, e);
+                while (d.size() > self.keep) { self.byId.remove(d.popBack().id); }
+            }
+            self.lock.unlock();
+        }
+        fn find(id: string) -> TelescopeEntry {
+            self.lock.lock();
+            let e = self.byId.getOr(id, null);
+            self.lock.unlock();
+            return e;
+        }
+        fn query(q: EntryQuery) -> Array<TelescopeEntry> {
+            let out = new Array<TelescopeEntry>();
+            self.lock.lock();
+            let all = new Array<TelescopeEntry>();
+            if (q.type != "") { let d = self.byType.getOr(q.type, null); if (d != null) { for (e in d) { all.push(e); } } }
+            else { for ((_, d) in self.byType) { for (e in d) { all.push(e); } } }
+            self.lock.unlock();
+            if (q.type == "") { all.sortBy(fn(a: TelescopeEntry, b: TelescopeEntry) -> int { return a.seq > b.seq ? -1 : (a.seq < b.seq ? 1 : 0); }); }
+            for (e in all) {
+                if (out.size() >= q.limit) { break; }
+                if (q.beforeSeq > 0 && e.seq >= q.beforeSeq) { continue; }
+                if (q.batchId != "" && e.batchId != q.batchId) { continue; }
+                if (q.tag != "" && !e.tags.contains(q.tag)) { continue; }
+                out.push(e);
+            }
+            return out;
+        }
+        fn counts() -> HashMap<string, long> {
+            let out = new HashMap<string, long>();
+            self.lock.lock();
+            for ((t, d) in self.byType) { out.put(t, d.size() as long); }
+            self.lock.unlock();
+            return out;
+        }
+        fn prune(hours: long) -> long {
+            let cut = Time.nowMs() - hours * 3600000;
+            let n: long = 0;
+            self.lock.lock();
+            for ((_, d) in self.byType) {
+                while (!d.isEmpty() && d.peekBack().createdAt < cut) { self.byId.remove(d.popBack().id); n += 1; }
+            }
+            self.lock.unlock();
+            return n;
+        }
+        fn clear() { self.lock.lock(); self.byType.clear(); self.byId.clear(); self.lock.unlock(); }
+    }
+
+    // In a database (SQLite, MySQL, PostgreSQL), shared by every process.
+    class DatabaseTelescopeStore implements TelescopeStore {
+        public table: string
+        private pool: Pool
+        private seq: AtomicInt = new AtomicInt(0)
+        constructor(pool: Pool, table: string = "telescope_entries") { self.pool = pool; self.table = table; }
+        private fn with(f: fn(Connection)) {
+            let c = self.pool.acquire();
+            try { f(c); } finally { self.pool.release(c); }
+        }
+        fn createTable() {
+            self.with(fn(c: Connection) {
+                let text = c.driver() == "mysql" ? "LONGTEXT" : "TEXT";
+                c.exec("CREATE TABLE IF NOT EXISTS " + self.table + " (id VARCHAR(64) NOT NULL PRIMARY KEY, seq BIGINT NOT NULL, batch_id VARCHAR(64) NOT NULL, " +
+                       "type VARCHAR(32) NOT NULL, created_at BIGINT NOT NULL, content " + text + " NOT NULL, tags " + text + " NOT NULL)");
+                if (c.driver() == "mysql") {
+                    let has = c.queryValue("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
+                                           [self.table, self.table + "_type_seq"]);
+                    if (Integer.parseOr(str(has), 0) == 0) { c.exec("CREATE INDEX " + self.table + "_type_seq ON " + self.table + " (type, seq)"); }
+                } else {
+                    c.exec("CREATE INDEX IF NOT EXISTS " + self.table + "_type_seq ON " + self.table + " (type, seq)");
+                    c.exec("CREATE INDEX IF NOT EXISTS " + self.table + "_batch ON " + self.table + " (batch_id)");
+                }
+            });
+        }
+        fn store(entries: Array<TelescopeEntry>) {
+            if (entries.size() == 0) { return; }
+            self.with(fn(c: Connection) {
+                c.transaction(fn() {
+                    for (e in entries) {
+                        // (time first, so entries from several processes still sort by when)
+                        e.seq = e.createdAt * 1000 + (self.seq.increment() % 1000);
+                        c.execute("INSERT INTO " + self.table + " (id, seq, batch_id, type, created_at, content, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                  [e.id, e.seq, e.batchId, e.type, e.createdAt, e.content.toJson(), Str.join(e.tags, ",")]);
+                    }
+                });
+            });
+        }
+        private fn entries(rows: ResultSet) -> Array<TelescopeEntry> {
+            let out = new Array<TelescopeEntry>();
+            for (r in rows) {
+                out.push(TelescopeEntry.fromRow(r.getString("id"), Integer.parseOr(str(r.get("seq")), 0), r.getString("batch_id"), r.getString("type"),
+                                                Integer.parseOr(str(r.get("created_at")), 0), r.getString("content"), r.getString("tags")));
+            }
+            return out;
+        }
+        fn find(id: string) -> TelescopeEntry {
+            let out: TelescopeEntry = null;
+            self.with(fn(c: Connection) {
+                let found = self.entries(c.query("SELECT * FROM " + self.table + " WHERE id = ?", [id]));
+                if (found.size() > 0) { out = found[0]; }
+            });
+            return out;
+        }
+        fn query(q: EntryQuery) -> Array<TelescopeEntry> {
+            let out = new Array<TelescopeEntry>();
+            self.with(fn(c: Connection) {
+                let where = new Array<string>();
+                let args = new Array<any>();
+                if (q.type != "") { where.push("type = ?"); args.push(q.type); }
+                if (q.batchId != "") { where.push("batch_id = ?"); args.push(q.batchId); }
+                if (q.beforeSeq > 0) { where.push("seq < ?"); args.push(q.beforeSeq); }
+                if (q.tag != "") { where.push("(tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)"); args.push(q.tag); args.push(q.tag + ",%"); args.push("%," + q.tag); args.push("%," + q.tag + ",%"); }
+                let sql = "SELECT * FROM " + self.table + (where.size() > 0 ? " WHERE " + Str.join(where, " AND ") : "") + " ORDER BY seq DESC LIMIT " + str(q.limit);
+                out = self.entries(c.query(sql, args));
+            });
+            return out;
+        }
+        fn counts() -> HashMap<string, long> {
+            let out = new HashMap<string, long>();
+            self.with(fn(c: Connection) {
+                for (r in c.query("SELECT type, COUNT(*) AS n FROM " + self.table + " GROUP BY type")) { out.put(r.getString("type"), Integer.parseOr(str(r.get("n")), 0)); }
+            });
+            return out;
+        }
+        fn prune(hours: long) -> long {
+            let n: long = 0;
+            self.with(fn(c: Connection) { n = c.execute("DELETE FROM " + self.table + " WHERE created_at < ?", [Time.nowMs() - hours * 3600000]); });
+            return n;
+        }
+        fn clear() { self.with(fn(c: Connection) { c.execute("DELETE FROM " + self.table); }); }
+    }
+}
