@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.2 (2026-11-21)
+
 - Recording a query no longer goes over the request's earlier entries (for
   the N+1 check): a request of 2000 queries costs Telescope 27 ms, not 280.
 
