@@ -6,6 +6,9 @@ compiler versions it builds with.
 
 ## Unreleased
 
+- A request that ends in an `HttpException` (a 404 from the router, say) is
+  recorded with that status, not as a 500 failure.
+
 ## 0.1.0 (2026-11-21)
 
 The first release. Needs grav 1.10.1 or newer.
