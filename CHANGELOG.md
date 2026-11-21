@@ -6,6 +6,9 @@ compiler versions it builds with.
 
 ## Unreleased
 
+- Recording a query no longer goes over the request's earlier entries (for
+  the N+1 check): a request of 2000 queries costs Telescope 27 ms, not 280.
+
 ## 0.1.1 (2026-11-21)
 
 - A request that ends in an `HttpException` (a 404 from the router, say) is
