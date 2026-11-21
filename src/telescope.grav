@@ -17,7 +17,6 @@
 // batch, so a request's page shows everything it did.
 import "std"
 import "std/net"
-import "apogee-container"
 import "apogee-events"
 import "apogee-http"
 import "apogee-routing"
@@ -403,7 +402,7 @@ namespace apogee {
             o.set("status", status as long);
             o.set("ms", ms);
             o.set("ip", req.ip());
-            o.set("memoryKb", ((Process.memoryUsage() - memBefore) / 1024) as long);
+            o.set("memoryKb", (Process.memoryUsage() - memBefore) / 1024);
             let user = req.user;
             o.set("user", user == null ? "" : Telescope.json(user).toJson());
             let h = Json.object();

@@ -190,7 +190,7 @@ namespace apogee {
             });
         }
         fn store(entries: Array<TelescopeEntry>) {
-            if (entries.size() == 0) { return; }
+            if (entries.isEmpty()) { return; }
             self.with(fn(c: Connection) {
                 c.transaction(fn() {
                     for (e in entries) {
@@ -214,7 +214,7 @@ namespace apogee {
             let out: TelescopeEntry = null;
             self.with(fn(c: Connection) {
                 let found = self.entries(c.query("SELECT * FROM " + self.table + " WHERE id = ?", [id]));
-                if (found.size() > 0) { out = found[0]; }
+                if (!found.isEmpty()) { out = found[0]; }
             });
             return out;
         }
@@ -242,7 +242,7 @@ namespace apogee {
                     args.push("%," + q.tag)
                     args.push("%," + q.tag + ",%")
                 }
-                let sql = "SELECT * FROM " + self.table + (where.size() > 0 ? " WHERE " + Str.join(where, " AND ") : "") + " ORDER BY seq DESC LIMIT " + str(q.limit);
+                let sql = "SELECT * FROM " + self.table + (!where.isEmpty() ? " WHERE " + Str.join(where, " AND ") : "") + " ORDER BY seq DESC LIMIT " + str(q.limit);
                 out = self.entries(c.query(sql, args));
             });
             return out;

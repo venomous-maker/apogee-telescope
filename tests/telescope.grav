@@ -3,7 +3,6 @@
 // ones flagged), model changes, log lines, dumps and exceptions in one batch;
 // secrets are hidden; jobs; the database store; the page, its API and the gate.
 import "std"
-import "std/net"
 import "apogee-container"
 import "apogee-events"
 import "apogee-http"
@@ -95,7 +94,7 @@ test "requests are recorded with everything they did" {
     let kinds = new HashSet<string>()
     for (e in batch) { kinds.add(e.type) }
     assert(kinds.contains("query") && kinds.contains("log") && kinds.contains("dump") && kinds.contains("request"))
-    assert(entries("query", "repeated").size() > 0)
+    assert(!entries("query", "repeated").isEmpty())
     assertEq(entries("model", "created").size(), 6)
     assertEq(entries("log")[0].content.getString("message", ""), "listed notes")
     assertEq(entries("dump")[0].content.getString("label", ""), "how many")
