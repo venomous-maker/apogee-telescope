@@ -1,0 +1,171 @@
+// apogee-telescope's tests: an app on the router with Telescope's middleware,
+// Orbit models on SQLite: requests are recorded with their queries (repeated
+// ones flagged), model changes, log lines, dumps and exceptions in one batch;
+// secrets are hidden; jobs; the database store; the page, its API and the gate.
+import "std"
+import "std/net"
+import "apogee-container"
+import "apogee-events"
+import "apogee-http"
+import "apogee-routing"
+import "apogee-queue"
+import "apogee-testing"
+import "grav-orbit"
+import "grav-logger"
+import "../src/all.grav"
+use apogee.*
+use orbit.*
+use logger.*
+
+class Note extends Model {
+    public id: long = 0
+    public title: string = ""
+}
+
+class Ping extends Job { constructor() {}  fn tags() -> Array<string> { return ["ping"] }  fn handle() {} }
+
+fn setup() -> HttpKernel {
+    let file = Dir.temp() + "/telescope_test_" + str(Process.pid()) + ".sqlite"
+    new File(file).delete()
+    DB.connect(Sqlite.open(file))
+    Note.createTable()
+    Telescope.use(new MemoryTelescopeStore())
+    Telescope.recording = true
+    Telescope.watchQueries()
+    Telescope.watchModels()
+    let log = new LogChannel("app").addHandler(new TelescopeLogHandler())
+    let r = new Router(new Container())
+    r.aliasMiddleware("telescope", fn(args: Array<string>) -> Middleware { return new TelescopeMiddleware() })
+    r.use("telescope")
+    r.get("/notes", fn(req: Request) -> Response {
+        let notes = Note.all()
+        for (n in notes) { Note.find(n.id) }                // an N+1, on purpose
+        log.info("listed notes", {"count": notes.size()})
+        Telescope.dump(notes.size(), "how many")
+        return Response.json({"count": notes.size()})
+    })
+    r.post("/notes", fn(req: Request) -> Response {
+        let n = new Note()
+        n.title = str(req.input("title", ""))
+        n.save()
+        return Response.json({"id": n.id}, 201)
+    })
+    r.get("/boom", fn(req: Request) -> Response { throw new StateError("the flux capacitor broke") })
+    let k = new HttpKernel(r)
+    Telescope.watchExceptions(k)
+    Telescope.routes(r)
+    return k
+}
+
+fn entries(type: string, tag: string = "") -> Array<TelescopeEntry> {
+    let q = new EntryQuery()
+    q.type = type
+    q.tag = tag
+    q.limit = 500
+    return Telescope.store.query(q)
+}
+
+test "requests are recorded with everything they did" {
+    let c = new TestClient(setup())
+    c.postJson("/notes", {"title": "one", "password": "hunter2"}).assertCreated()
+    for (i in 0..5) { c.postJson("/notes", {"title": "n" + str(i)}) }
+    c.withHeader("Authorization", "Bearer abc").getJson("/notes").assertOk()
+    let reqs = entries("request")
+    assertEq(reqs.size(), 7)
+    let list = reqs[0]
+    assertEq(list.content.getString("path", ""), "/notes")
+    assertEq(list.content.getInt("status", 0), 200)
+    assert(list.tags.contains("repeated-queries"))
+    assertEq(list.content.get("headers").getString("Authorization", ""), "********")
+    let created = reqs[6]
+    assertEq(created.content.get("payload").getString("password", ""), "********")
+    assertEq(created.content.get("payload").getString("title", ""), "one")
+    // the batch of the list request
+    let q = new EntryQuery()
+    q.batchId = list.batchId
+    q.limit = 100
+    let batch = Telescope.store.query(q)
+    let kinds = new HashSet<string>()
+    for (e in batch) { kinds.add(e.type) }
+    assert(kinds.contains("query") && kinds.contains("log") && kinds.contains("dump") && kinds.contains("request"))
+    assert(entries("query", "repeated").size() > 0)
+    assertEq(entries("model", "created").size(), 6)
+    assertEq(entries("log")[0].content.getString("message", ""), "listed notes")
+    assertEq(entries("dump")[0].content.getString("label", ""), "how many")
+}
+
+test "exceptions and failed requests" {
+    let c = new TestClient(setup())
+    c.getJson("/boom").assertServerError()
+    let ex = entries("exception")
+    assertEq(ex.size(), 1)                                  // once, not by both the middleware and the kernel
+    assertEq(ex[0].content.getString("kind", ""), "StateError")
+    assert(Str.contains(ex[0].content.getString("message", ""), "flux capacitor"))
+    assert(entries("request", "failed").size() == 1)
+    assert(entries("request", "status:500").size() == 1)
+}
+
+test "jobs" {
+    setup()
+    let c = new Container()
+    let q = new QueueManager(c)
+    q.addConnection("memory", new MemoryQueueDriver())
+    q.defaultConnection = "memory"
+    let events = new Events(c)
+    q.events = events
+    Telescope.watchJobs(events)
+    q.dispatch(new Ping())
+    let o = new WorkerOptions(); o.memoryMb = 0; o.stopWhenEmpty = true
+    q.worker().work("memory", ["default"], o)
+    assertEq(entries("job", "queued").size(), 1)
+    assertEq(entries("job", "processed").size(), 1)
+    assertEq(entries("job", "ping").size(), 2)
+}
+
+test "the database store" {
+    let file = Dir.temp() + "/telescope_store_" + str(Process.pid()) + ".sqlite"
+    new File(file).delete()
+    let store = new DatabaseTelescopeStore(new Pool(2, fn() -> Connection { return Sqlite.open(file) }))
+    store.createTable()
+    store.createTable()
+    let a = new TelescopeEntry("log", Json.parse("{\"message\":\"hello\"}"))
+    a.tags.push("info")
+    a.batchId = "b1"
+    let b = new TelescopeEntry("query", Json.parse("{\"sql\":\"SELECT 1\",\"ms\":1.5}"))
+    b.tags.push("slow")
+    b.tags.push("repeated")
+    b.batchId = "b1"
+    store.store([a, b] as Array<TelescopeEntry>)
+    assertEq(store.find(a.id).content.getString("message", ""), "hello")
+    let q = new EntryQuery()
+    q.tag = "repeated"
+    assertEq(store.query(q).size(), 1)
+    q = new EntryQuery()
+    q.batchId = "b1"
+    assertEq(store.query(q).size(), 2)
+    assertEq(store.counts().get("query"), 1 as long)
+    assertEq(store.prune(1), 0 as long)
+    store.clear()
+    assertEq(store.query(new EntryQuery()).size(), 0)
+    new File(file).delete()
+}
+
+test "the page, its API, and the gate" {
+    let c = new TestClient(setup())
+    c.getJson("/notes")
+    c.get("/telescope").assertOk().assertSee("<title>Telescope</title>")
+    let list = c.getJson("/telescope/api/entries?type=request").assertOk()
+    let n = list.json().size()
+    assert(n >= 1)
+    c.getJson("/telescope/api/entries/" + list.jsonAt("0.id").asString()).assertOk().assertJsonPath("type", "request")
+    c.getJson("/telescope/api/entries?type=request").assertJsonCount(n)          // the dashboard's own requests are not recorded
+    c.getJson("/telescope/api/counts").assertOk().assertJsonPath("recording", true)
+    c.postJson("/telescope/api/pause", null).assertOk()
+    c.getJson("/notes")
+    c.postJson("/telescope/api/resume", null).assertOk()
+    c.getJson("/telescope/api/entries?type=request").assertJsonCount(n)          // nothing while paused
+    c.postJson("/telescope/api/clear", null).assertOk()
+    c.getJson("/telescope/api/entries").assertJsonCount(0)
+    c.remote = "203.0.113.5:9999"
+    c.getJson("/telescope/api/counts").assertForbidden()
+}
