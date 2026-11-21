@@ -51,6 +51,7 @@ fn setup() -> HttpKernel {
         return Response.json({"id": n.id}, 201)
     })
     r.get("/boom", fn(req: Request) -> Response { throw new StateError("the flux capacitor broke") })
+    r.get("/gone", fn(req: Request) -> Response { throw new HttpException(404) })
     let k = new HttpKernel(r)
     Telescope.watchExceptions(k)
     Telescope.routes(r)
@@ -103,6 +104,11 @@ test "exceptions and failed requests" {
     assert(Str.contains(ex[0].content.getString("message", ""), "flux capacitor"))
     assert(entries("request", "failed").size() == 1)
     assert(entries("request", "status:500").size() == 1)
+    // a 404 thrown on the way is recorded as the 404 it becomes, not a failure
+    c.getJson("/gone").assertNotFound()
+    assertEq(entries("request", "status:404").size(), 1)
+    assertEq(entries("request", "failed").size(), 1)
+    assertEq(entries("exception").size(), 1)
 }
 
 test "jobs" {
