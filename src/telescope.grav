@@ -31,6 +31,19 @@ use logger.*
 
 namespace apogee {
 
+    // What one thread is recording (a request or a job): its entries, and how
+    // often it ran each statement (for the N+1 check, without going over them).
+    class TelescopeBatch {
+        public id: string
+        public entries: Array<TelescopeEntry> = new Array<TelescopeEntry>()
+        public statements: HashMap<string, int> = new HashMap<string, int>()
+        public queries: int = 0
+        public repeated: bool = false
+        constructor(id: string) {
+            self.id = id;
+        }
+    }
+
     class Telescope {
         static store: TelescopeStore = new MemoryTelescopeStore()
         static recording: bool = true
@@ -48,9 +61,8 @@ namespace apogee {
         static watchingExceptions: bool = false
         private static gate: fn(Request) -> bool = null
         private static base: string = "/telescope"
-        // thread -> the batch it is recording, and the entries waiting for its end
-        private static batches: HashMap<long, string> = new HashMap<long, string>()
-        private static pending: HashMap<long, Array<TelescopeEntry>> = new HashMap<long, Array<TelescopeEntry>>()
+        // thread -> the batch it is recording
+        private static batches: HashMap<long, TelescopeBatch> = new HashMap<long, TelescopeBatch>()
         private static lock: Mutex = new Mutex()
 
         static fn use(s: TelescopeStore) {
@@ -71,39 +83,42 @@ namespace apogee {
         // Starts a batch on this thread (a request or a job): entries wait for
         // its end, and are stored together.
         static fn startBatch() -> string {
-            let id = Text.uuid();
+            let b = new TelescopeBatch(Text.uuid());
             let t = Thread.currentId();
             Telescope.lock.lock();
-            Telescope.batches.put(t, id);
-            Telescope.pending.put(t, new Array<TelescopeEntry>());
+            Telescope.batches.put(t, b);
             Telescope.lock.unlock();
-            return id;
+            return b.id;
         }
         // Ends this thread's batch and stores its entries (the request entry last).
         static fn endBatch() {
             let t = Thread.currentId();
             Telescope.lock.lock();
-            let entries = Telescope.pending.getOr(t, null);
+            let b = Telescope.batches.getOr(t, null);
             Telescope.batches.remove(t);
-            Telescope.pending.remove(t);
             Telescope.lock.unlock();
-            if (entries != null && entries.size() > 0) {
-                try { Telescope.store.store(entries); } catch (e: Exception) {}
+            if (b != null && !b.entries.isEmpty()) {
+                try { Telescope.store.store(b.entries); } catch (e: Exception) {}
             }
         }
-        static fn currentBatch() -> string {
+        // This thread's batch (null outside one).
+        static fn batch() -> TelescopeBatch {
             let t = Thread.currentId();
             Telescope.lock.lock();
-            let b = Telescope.batches.getOr(t, "");
+            let b = Telescope.batches.getOr(t, null);
             Telescope.lock.unlock();
             return b;
         }
+        static fn currentBatch() -> string {
+            let b = Telescope.batch()
+            return b == null ? "" : b.id
+        }
         // The entries this thread's batch holds so far.
         static fn batchEntries() -> Array<TelescopeEntry> {
-            let t = Thread.currentId();
+            let b = Telescope.batch();
+            if (b == null) { return new Array<TelescopeEntry>(); }
             Telescope.lock.lock();
-            let p = Telescope.pending.getOr(t, null);
-            let out = p == null ? new Array<TelescopeEntry>() : p.copy();
+            let out = b.entries.copy();
             Telescope.lock.unlock();
             return out;
         }
@@ -116,13 +131,13 @@ namespace apogee {
             if (f != null && !f(e)) { return null; }
             let t = Thread.currentId();
             Telescope.lock.lock();
-            let p = Telescope.pending.getOr(t, null);
-            if (p != null) {
-                e.batchId = Telescope.batches.get(t)
-                p.push(e)
+            let b = Telescope.batches.getOr(t, null);
+            if (b != null) {
+                e.batchId = b.id
+                b.entries.push(e)
             }
             Telescope.lock.unlock();
-            if (p == null) {
+            if (b == null) {
                 let one = new Array<TelescopeEntry>();
                 one.push(e);
                 try { Telescope.store.store(one); } catch (x: Exception) {}
@@ -155,9 +170,9 @@ namespace apogee {
                 if (!Telescope.recording) { return; }
                 let o = Json.object();
                 o.set("sql", q.sql);
-                let b = Json.array();
-                for (x in q.bindings) { b.push(Telescope.json(x)); }
-                o.set("bindings", b);
+                let binds = Json.array();
+                for (x in q.bindings) { binds.push(Telescope.json(x)); }
+                o.set("bindings", binds);
                 o.set("connection", q.connection);
                 o.set("ms", q.ms);
                 o.set("rows", q.rows);
@@ -166,9 +181,16 @@ namespace apogee {
                 let tags = new Array<string>();
                 if (q.ms >= Telescope.slowQueryMs) { tags.push("slow"); }
                 // repeated in this batch: the same statement again (an N+1)
-                let same = 0;
-                for (e in Telescope.batchEntries()) { if (e.type == "query" && e.content.getString("sql", "") == q.sql) { same += 1; } }
-                if (same + 1 >= Telescope.repeatedQueries) { tags.push("repeated"); }
+                let b = Telescope.batch();
+                if (b != null) {
+                    Telescope.lock.lock();
+                    let n = b.statements.getOr(q.sql, 0) + 1;
+                    b.statements.put(q.sql, n);
+                    b.queries += 1;
+                    if (n >= Telescope.repeatedQueries) { b.repeated = true; }
+                    Telescope.lock.unlock();
+                    if (n >= Telescope.repeatedQueries) { tags.push("repeated"); }
+                }
                 Telescope.record("query", o, tags);
             });
         }
@@ -400,15 +422,9 @@ namespace apogee {
                 else if (Str.contains(type, "html")) { o.set("response", "HTML (" + str(body.length) + " bytes)"); }
                 else { o.set("response", TelescopeMiddleware.cut(body, self.maxBodyBytes)); }
             }
-            let queries = 0;
-            let repeated = false;
-            for (e in Telescope.batchEntries()) {
-                if (e.type == "query") {
-                    queries += 1
-                    if (e.tags.contains("repeated")) { repeated = true; }
-                }
-            }
-            o.set("queries", queries as long);
+            let b = Telescope.batch();
+            let repeated = b != null && b.repeated;
+            o.set("queries", (b == null ? 0 : b.queries) as long);
             let tags = new Array<string>();
             tags.push("status:" + str(status));
             if (status >= 500) { tags.push("failed"); }
