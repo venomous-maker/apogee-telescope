@@ -342,7 +342,9 @@ namespace apogee {
             o.set("method", req.method());
             o.set("uri", req.http.target);
             o.set("path", path);
-            o.set("status", (res == null ? 500 : res.http.status) as long);
+            // (an HttpException is answered by the kernel after us, with its own status)
+            let status = res != null ? res.http.status : (failure is HttpException ? (failure as HttpException).status : 500);
+            o.set("status", status as long);
             o.set("ms", ms);
             o.set("ip", req.ip());
             o.set("memoryKb", ((Process.memoryUsage() - memBefore) / 1024) as long);
@@ -369,12 +371,11 @@ namespace apogee {
             for (e in Telescope.batchEntries()) { if (e.type == "query") { queries += 1; if (e.tags.contains("repeated")) { repeated = true; } } }
             o.set("queries", queries as long);
             let tags = new Array<string>();
-            let status = res == null ? 500 : res.http.status;
             tags.push("status:" + str(status));
             if (status >= 500) { tags.push("failed"); }
             if (repeated) { tags.push("repeated-queries"); }
             // (once: the kernel reports what reaches it, when that is watched)
-            if (failure != null && !Telescope.watchingExceptions) { Telescope.recordException(failure); }
+            if (failure != null && status >= 500 && !Telescope.watchingExceptions) { Telescope.recordException(failure); }
             Telescope.record("request", o, tags);
             Telescope.endBatch();
             if (failure != null) { throw failure; }
