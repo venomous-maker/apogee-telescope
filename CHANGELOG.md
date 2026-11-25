@@ -13,6 +13,10 @@ Needs grav 1.12.0 or newer.
 - Its tables as a migration (`CreateTelescopeEntriesTable`, run by `migrate`); the store's own
   table-making method uses the same definition.
 
+### Dependencies
+
+- Uses apogee-package 0.1.0, apogee-console 0.2.2, apogee-http 0.3.0, apogee-routing 0.3.0, apogee-queue 0.3.1, grav-orbit 0.3.0, apogee-testing 0.1.1 (from their GitHub tags).
+
 ## 0.1.2 (2026-11-21)
 
 - Recording a query no longer goes over the request's earlier entries (for
