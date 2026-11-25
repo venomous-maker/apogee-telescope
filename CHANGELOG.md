@@ -6,6 +6,13 @@ compiler versions it builds with.
 
 ## Unreleased
 
+Needs grav 1.12.0 or newer.
+
+- `TelescopePackage`: the module connects itself to an apogee-framework app (apogee-package):
+  its settings, wiring and commands moved here from the framework.
+- Its tables as a migration (`CreateTelescopeEntriesTable`, run by `migrate`); the store's own
+  table-making method uses the same definition.
+
 ## 0.1.2 (2026-11-21)
 
 - Recording a query no longer goes over the request's earlier entries (for
