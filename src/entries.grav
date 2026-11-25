@@ -4,6 +4,7 @@
 // or job did) and tags to find it by.
 import "std"
 import "grav-db"
+import "migration.grav"
 use db.*
 
 namespace apogee {
@@ -174,21 +175,8 @@ namespace apogee {
             let c = self.pool.acquire();
             try { f(c); } finally { self.pool.release(c); }
         }
-        fn createTable() {
-            self.with(fn(c: Connection) {
-                let text = c.driver() == "mysql" ? "LONGTEXT" : "TEXT";
-                c.exec("CREATE TABLE IF NOT EXISTS " + self.table + " (id VARCHAR(64) NOT NULL PRIMARY KEY, seq BIGINT NOT NULL, batch_id VARCHAR(64) NOT NULL, " +
-                       "type VARCHAR(32) NOT NULL, created_at BIGINT NOT NULL, content " + text + " NOT NULL, tags " + text + " NOT NULL)");
-                if (c.driver() == "mysql") {
-                    let has = c.queryValue("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
-                                           [self.table, self.table + "_type_seq"]);
-                    if (Integer.parseOr(str(has), 0) == 0) { c.exec("CREATE INDEX " + self.table + "_type_seq ON " + self.table + " (type, seq)"); }
-                } else {
-                    c.exec("CREATE INDEX IF NOT EXISTS " + self.table + "_type_seq ON " + self.table + " (type, seq)");
-                    c.exec("CREATE INDEX IF NOT EXISTS " + self.table + "_batch ON " + self.table + " (batch_id)");
-                }
-            });
-        }
+        // Makes the table (nothing if it is there); in an app, `migrate` does (CreateTelescopeEntriesTable).
+        fn createTable() { self.with(fn(c: Connection) { CreateTelescopeEntriesTable.ensure(c, self.table); }); }
         fn store(entries: Array<TelescopeEntry>) {
             if (entries.isEmpty()) { return; }
             self.with(fn(c: Connection) {

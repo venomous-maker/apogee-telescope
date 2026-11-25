@@ -1,0 +1,32 @@
+// migration.grav — the telescope_entries table, as a migration for `migrate`;
+// DatabaseTelescopeStore.createTable() makes the same.
+import "std"
+import "grav-db"
+import "grav-orbit"
+use db.*
+use orbit.*
+
+namespace apogee {
+
+    class CreateTelescopeEntriesTable extends Migration {
+        public table: string
+        constructor(table: string = "telescope_entries") { self.table = table; }
+        fn name() -> string { return "CreateTelescopeEntriesTable"; }
+        static fn define(t: Blueprint) {
+            t.varchar("id", 64).primary();
+            t.bigInteger("seq");
+            t.varchar("batch_id", 64);
+            t.varchar("type", 32);
+            t.bigInteger("created_at");
+            t.longText("content");
+            t.longText("tags");
+            t.index(["type", "seq"]);
+            t.index("batch_id");
+        }
+        fn up() { CreateTelescopeEntriesTable.ensure(DB.connection(), self.table); }
+        fn down() { Schema.dropIfExists(self.table); }
+        static fn ensure(c: Connection, table: string) {
+            if (!Schema.hasTableOn(c, table)) { Schema.createOn(c, table, fn(t: Blueprint) { CreateTelescopeEntriesTable.define(t); }); }
+        }
+    }
+}
