@@ -1,0 +1,69 @@
+// TelescopePackage: off unless enabled; when on, the database store from its migration and the page.
+import "std"
+import "apogee-container"
+import "apogee-config"
+import "apogee-package"
+import "apogee-events"
+import "apogee-http"
+import "apogee-routing"
+import "apogee-queue"
+import "apogee-testing"
+import "grav-db"
+import "grav-orbit"
+import "grav-logger"
+import "../src/all.grav"
+use apogee.*
+use db.*
+use orbit.*
+use logger.*
+
+// What the framework binds, for a package to boot against.
+fn appContainer() -> Container {
+    let c = new Container()
+    c.instance::<Events>(new Events(c))
+    let r = new Router(c)
+    c.instance::<Router>(r)
+    c.instance::<HttpKernel>(new HttpKernel(r))
+    c.instance::<LogChannel>(new LogChannel("test"))
+    c.instance::<QueueManager>(new QueueManager(c))
+    r.aliasMiddleware("session", fn(a: Array<string>) -> Middleware { return new SameOriginOnly() })
+    return c
+}
+
+test "the package connects itself" {
+    let file = Dir.temp() + "/telescope_pkg_" + str(Process.pid()) + ".sqlite"
+    new File(file).delete()
+    DB.connect(Sqlite.open(file))
+    let ps = Packages.discover()
+    assertEq(ps[0].name(), "telescope")
+    Packages.applyDefaults(ps)
+    assert(!Config.getBool("telescope.enabled", true))                     // off unless local
+    for (m in ps[0].migrations()) { (m as Migration).up() }
+    assert(Schema.hasTable("telescope_entries"))
+    let c = appContainer()
+    ps[0].boot(new PackageContext(c, "local", ""))
+    assert(!Telescope.recording)
+    Config.set("telescope.enabled", true)
+    let ctx = new PackageContext(c, "local", "")
+    ctx.poolFn = fn() -> Pool { return new Pool(1, fn() -> Connection { return Sqlite.open(file) as Connection }) }
+    ps[0].boot(ctx)
+    assert(Telescope.recording)
+    let client = new TestClient(c.make::<HttpKernel>())
+    client.get("/telescope").assertOk()
+    assertEq(ps[0].commands().size(), 2)
+    Telescope.recording = false
+    new File(file).delete()
+}
+
+// With TELESCOPE_MYSQL_URL / TELESCOPE_POSTGRES_URL set (mysql://… / postgres://…).
+test "the migration on MySQL and PostgreSQL" {
+    for (url in [env("TELESCOPE_MYSQL_URL"), env("TELESCOPE_POSTGRES_URL")]) {
+        if (url == "") { continue }
+        DB.connect(Str.startsWith(url, "mysql") ? MySql.open(url) as Connection : Postgres.open(url) as Connection)
+        for (m in Packages.discover()[0].migrations()) { (m as Migration).down() }
+        for (m in Packages.discover()[0].migrations()) { (m as Migration).up() }
+        assert(Schema.hasTable("telescope_entries"))
+        for (m in Packages.discover()[0].migrations()) { (m as Migration).down() }
+        assert(!Schema.hasTable("telescope_entries"))
+    }
+}
