@@ -1,0 +1,78 @@
+// package.grav — how apogee-telescope connects itself to an app
+// (apogee-package): telescope.enabled (by default only when local) records
+// every request and what it did, shown at /telescope; the entries table
+// (CreateTelescopeEntriesTable); telescope:prune and telescope:clear.
+import "std"
+import "apogee-config"
+import "apogee-package"
+import "apogee-events"
+import "apogee-routing"
+import "apogee-console"
+import "grav-logger"
+import "entries.grav"
+import "telescope.grav"
+import "migration.grav"
+use logger.*
+
+namespace apogee {
+
+    class TelescopePackage extends ApogeePackage {
+        constructor() {}
+        fn name() -> string { return "telescope"; }
+        // (always connected: when off it only makes sure nothing is recorded)
+        fn enabled() -> bool { return true; }
+        fn defaults() -> HashMap<string, any> {
+            return {"telescope.enabled": Env.getBool("TELESCOPE_ENABLED", Env.get("APP_ENV", "production") == "local"),
+                    "telescope.driver": Env.get("TELESCOPE_DRIVER", "database"),
+                    "telescope.path": Env.get("TELESCOPE_PATH", "telescope"),
+                    "telescope.slow_query_ms": Env.getInt("TELESCOPE_SLOW_QUERY_MS", 100),
+                    "telescope.ignore_paths": Env.get("TELESCOPE_IGNORE_PATHS", "")};
+        }
+        fn migrations() -> Array<any> { return [new CreateTelescopeEntriesTable() as any]; }
+        fn commands() -> Array<any> { return [new TelescopePruneCommand() as any, new TelescopeClearCommand() as any]; }
+        fn boot(app: PackageContext) {
+            if (!Config.getBool("telescope.enabled", false)) {
+                Telescope.recording = false
+                return
+            }
+            Telescope.use(Config.getString("telescope.driver", "database") == "database"
+                ? new DatabaseTelescopeStore(app.storePool()) as TelescopeStore : new MemoryTelescopeStore() as TelescopeStore);
+            Telescope.recording = true;
+            Telescope.slowQueryMs = Config.getInt("telescope.slow_query_ms", 100) as float;
+            Telescope.ignorePaths = PackageContext.list(Config.getString("telescope.ignore_paths"));
+            Telescope.watchQueries();
+            Telescope.watchModels();
+            Telescope.watchExceptions(app.make::<HttpKernel>());
+            Telescope.watchJobs(app.make::<Events>());
+            app.make::<LogChannel>().addHandler(new TelescopeLogHandler());
+            Telescope.setGate(app.dashboardGate("viewTelescope"));
+            let r = app.make::<Router>();
+            r.aliasInstance("telescope", new TelescopeMiddleware());
+            r.use("telescope");
+            let path = Config.getString("telescope.path", "telescope");
+            app.dashboardRoutes(fn(g: Router) { Telescope.routes(g, path); });
+        }
+    }
+
+    class TelescopePruneCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "telescope:prune {--hours=24 : Keep entries this recent}"; }
+        fn description() -> string { return "Remove old Telescope entries"; }
+        fn handle() -> int {
+            let hours = self.option("hours") != "" ? self.optionInt("hours") : 24 as long;
+            self.output.writeln("<info>Removed ${Telescope.store.prune(hours)} entries.</>");
+            return 0;
+        }
+    }
+
+    class TelescopeClearCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "telescope:clear"; }
+        fn description() -> string { return "Remove every Telescope entry"; }
+        fn handle() -> int {
+            Telescope.store.clear()
+            self.output.writeln("<info>Telescope entries cleared.</>")
+            return 0
+        }
+    }
+}
