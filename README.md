@@ -7,7 +7,7 @@ flagged), exceptions, log lines, queued jobs and model changes, kept for a
 while and shown at `/telescope`. One page with its own CSS and script (no
 build step), light and dark.
 
-```grav
+```typescript
 import "std"
 import "apogee-telescope"
 use apogee.*
