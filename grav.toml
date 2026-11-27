@@ -4,16 +4,16 @@ grav = ">=1.12.0"
 paths = ["src"]
 
 [dependencies]
-apogee-package = "github.com/venomous-maker/apogee-package@v0.1.0"
+apogee-package = "github.com/venomous-maker/apogee-package@v0.1.1"
 apogee-config = "github.com/venomous-maker/apogee-config@v0.2.0"
-apogee-console = "github.com/venomous-maker/apogee-console@v0.2.2"
+apogee-console = "github.com/venomous-maker/apogee-console@v0.2.3"
 apogee-container = "github.com/venomous-maker/apogee-container@v0.2.0"
 apogee-events = "github.com/venomous-maker/apogee-events@v0.2.0"
 apogee-http = "github.com/venomous-maker/apogee-http@v0.3.0"
 apogee-routing = "github.com/venomous-maker/apogee-routing@v0.3.0"
-apogee-queue = "github.com/venomous-maker/apogee-queue@v0.3.1"
-grav-orbit = "github.com/venomous-maker/grav-orbit@v0.3.0"
-grav-db = "github.com/venomous-maker/grav-db@v0.2.0"
+apogee-queue = "github.com/venomous-maker/apogee-queue@v0.3.2"
+grav-orbit = "github.com/venomous-maker/grav-orbit@v0.3.1"
+grav-db = "github.com/venomous-maker/grav-db@v0.2.1"
 grav-logger = "github.com/venomous-maker/grav-logger@v0.2.1"
 # (the tests drive the pages with it)
 apogee-testing = "github.com/venomous-maker/apogee-testing@v0.1.1"
